@@ -28,7 +28,10 @@ macOS iPhone 相片歸檔工具。
 20260918 棒球
 ```
 
-所有名稱為 `YYYYMMDD`，或以 `YYYYMMDD `（日期後一個空格）開頭的資料夾，都會套用相同的內部整理規則。\n\n標準 iPhone 檔名 `IMG_####` **不重新命名**；資料夾名稱已負責日期 / 主題分類。
+資料夾分成兩種：
+
+- `YYYYMM00`：日常資料夾。裡面的主媒體全部依拍攝 metadata 命名。
+- `YYYYMMDD 主題`：主題資料夾。標準 iPhone 檔名 `IMG_####` 保留原名，只有非標準檔名才依 metadata 命名。
 
 ## 編輯過的 iPhone 相片
 
@@ -40,7 +43,7 @@ IMG_E1234.JPG
 IMG_1234.AAE
 ```
 
-整理後會變成：
+在主題資料夾中整理後會變成：
 
 ```text
 IMG_1234.JPG
@@ -50,11 +53,35 @@ Originals/
     IMG_1234.AAE
 ```
 
-編輯後版本是主檔；原始媒體不刪除。
+在日常 `YYYYMM00` 中，編輯後版本成為主檔後，會再依原始拍攝時間命名：
 
-## 非標準檔名
+```text
+20260925-142530_IMG_1234.JPG
+Originals/
+  IMG_1234.HEIC
+  AAE/
+    IMG_1234.AAE
+```
 
-非 `IMG_####` 的媒體檔案會改成：
+日常編輯照片重新命名時，若 `Originals/IMG_1234.*` 存在，會優先從原始檔讀取拍攝時間；原始媒體本身不重新命名。
+
+## 檔名規則
+
+日常 `YYYYMM00`：
+
+```text
+IMG_1234.HEIC
+IMG_1234.MOV
+```
+
+會變成：
+
+```text
+20260925-142530_IMG_1234.HEIC
+20260925-142530_IMG_1234.MOV
+```
+
+主題 `YYYYMMDD 主題` 中的標準 `IMG_####` 保持不變；非標準檔名則改成：
 
 ```text
 YYYYMMDD-HHMMSS_原始檔名.ext
@@ -66,7 +93,7 @@ YYYYMMDD-HHMMSS_原始檔名.ext
 20260921-184501_A8F21D3C-91AE-4F44.JPG
 ```
 
-同 basename 的照片與影片會使用同一組拍攝時間。
+同 basename 的照片與影片會使用同一組拍攝時間。已經是 `YYYYMMDD-HHMMSS_...` 的檔案不會再次重新命名。
 
 ## 日期來源
 
@@ -95,8 +122,12 @@ Repository 內含 macOS GitHub Actions 測試，會檢查：
 
 - `zsh -n` 語法。
 - `.command` 保持 executable。
-- `IMG_####` 未編輯照片維持原名。
+- 主題資料夾中的 `IMG_####` 維持原名。
+- 日常 `YYYYMM00` 中的 `IMG_####` 會加上拍攝時間。
 - `IMG_E####` 編輯版成為主檔。
 - 同副檔名時先把原檔移至 `Originals/`，再把編輯版換成 `IMG_####`，避免覆寫。
 - AAE 移至 `Originals/AAE/`。
 - 根目錄散圖進入當月 `YYYYMM00`。
+- 日常 Live Photo 的照片與 MOV 使用相同時間前綴。
+- 日常編輯照片主檔使用原始檔 metadata（若原始檔存在）。
+- 主題中的非標準檔名仍會依 metadata 重新命名。

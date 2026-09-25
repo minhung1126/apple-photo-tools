@@ -327,6 +327,11 @@ archive_dirs() {
   done
 }
 
+is_daily_dir() {
+  local name="${1:t}"
+  [[ "$name" == [0-9][0-9][0-9][0-9][0-9][0-9]00 ]]
+}
+
 build_root_plan() {
   local plan="$1"
   typeset -A seen
@@ -456,22 +461,42 @@ build_rename_plan() {
   local plan="$1"
   typeset -A seen
   local counter=0
-  local dir file name stem key group primary stamp c ext dest
-  local -a dirs candidates
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
 
   dirs=("${(@f)$(archive_dirs)}")
 
   for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
     for file in "$dir"/*(.N); do
       is_media "$file" || continue
 
       name="${file:t}"
       stem="${name%.*}"
 
-      # 標準 iPhone 主檔不改名；若編輯群組因衝突未處理，IMG_E 也保留等待下次。
-      [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]] && continue
-      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
       [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      if (( daily == 1 )); then
+        # 日常 YYYYMM00：標準 IMG_#### 也要加拍攝時間。
+        # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+        # 避免把原檔與待處理編輯版拆散。
+        [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+        if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+          num="${stem#IMG_}"
+          pending_edits=("$dir"/IMG_E"$num".*(.N))
+          if (( ${#pending_edits[@]} > 0 )); then
+            continue
+          fi
+        fi
+      else
+        # 主題 YYYYMMDD 主題：標準 iPhone IMG_#### 保留原名。
+        [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]] && continue
+        [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+      fi
 
       key="$dir|$stem"
       [[ -n "${seen[$key]-}" ]] && continue
@@ -482,12 +507,34 @@ build_rename_plan() {
       candidates=("$dir"/"$stem".*(.N))
       primary=""
 
-      for c in "${candidates[@]}"; do
-        if is_image "$c"; then
-          primary="$c"
-          break
+      # 日常中若主檔是編輯後版本，優先用 Originals 裡同名原檔讀拍攝時間。
+      if (( daily == 1 )) && [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        for c in "${original_candidates[@]}"; do
+          if is_image "$c"; then
+            primary="$c"
+            break
+          fi
+        done
+        if [[ -z "$primary" ]]; then
+          for c in "${original_candidates[@]}"; do
+            if is_media "$c"; then
+              primary="$c"
+              break
+            fi
+          done
         fi
-      done
+      fi
+
+      # 沒有歸檔原檔時，從目前這組檔案讀 metadata。
+      if [[ -z "$primary" ]]; then
+        for c in "${candidates[@]}"; do
+          if is_image "$c"; then
+            primary="$c"
+            break
+          fi
+        done
+      fi
       if [[ -z "$primary" ]]; then
         for c in "${candidates[@]}"; do
           if is_media "$c"; then
@@ -499,7 +546,7 @@ build_rename_plan() {
       [[ -n "$primary" ]] || continue
 
       stamp="$(capture_stamp "$primary")" || {
-        print "[WARN] 讀不到日期，不重新命名：$(relative_path "$primary")"
+        print "[WARN] 讀不到日期，不重新命名：$(relative_path "$file")"
         continue
       }
 
@@ -534,10 +581,10 @@ print ""
 print "規則："
 print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
 print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
-print "  3. 所有 YYYYMMDD... 資料夾都套用相同整理規則。"
-print "  4. 有 IMG_E#### 編輯版時：編輯版成為 IMG_#### 主檔；原始媒體進 Originals/。"
-print "  5. AAE 不刪除，放到 Originals/AAE/。"
-print "  6. 標準 IMG_#### 保留原名；只有非標準檔名才改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：標準 IMG_#### 保留原名；只有非標準檔名才加拍攝時間。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
 print "  7. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
 
 # 第一階段：根目錄散圖按月份進「日常」資料夾。
@@ -548,20 +595,22 @@ run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 Y
 build_edit_plan "$EDIT_PLAN"
 run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
 
-# 第三階段：處理仍然不符合格式的檔名。
+# 第三階段：日常資料夾全部 metadata 命名；主題資料夾只處理非標準檔名。
 build_rename_plan "$RENAME_PLAN"
-run_stage "$RENAME_PLAN" "非標準檔名整理" "以上非標準檔名將依拍攝時間重新命名。"
+run_stage "$RENAME_PLAN" "Metadata 檔名整理" "以上檔案將依日常/主題規則使用拍攝時間重新命名。"
 
 print ""
 print "最後的典型結構："
 print "  20260900/"
-print "    IMG_1234.JPG"
-print "    20260921-184501_A8F21D3C....JPG"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
 print "    Originals/"
 print "      IMG_1234.HEIC"
 print "      AAE/"
 print "  20260910 QWER/"
 print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
 print "    Originals/"
 
 pause_end

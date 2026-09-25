@@ -34,14 +34,19 @@ jobs:
           printf 'EDITED-JPG'   > "$test_root/20260910 QWER/IMG_E1234.JPG"
           printf 'AAE-DATA'     > "$test_root/20260910 QWER/IMG_1234.AAE"
           printf 'UNCHANGED'    > "$test_root/20260910 QWER/IMG_5678.HEIC"
+          printf 'TOPIC-ODD'     > "$test_root/20260910 QWER/topic odd.jpg"
 
           # Same-extension case: this verifies the original is archived before
           # the edited file claims the original IMG_#### name.
           printf 'ORIGINAL-SAME-EXT' > "$test_root/20260910 QWER/IMG_2222.HEIC"
           printf 'EDITED-SAME-EXT'   > "$test_root/20260910 QWER/IMG_E2222.HEIC"
 
-          # Loose files in root: standard names keep their names after monthly filing.
+          # Loose files in root: daily media must be renamed after monthly filing.
           printf 'DAILY' > "$test_root/IMG_9999.HEIC"
+
+          # Daily Live Photo pair must keep a shared timestamp prefix.
+          printf 'LIVE-HEIC' > "$test_root/IMG_8888.HEIC"
+          printf 'LIVE-MOV'  > "$test_root/IMG_8888.MOV"
 
           # Edited pair in root must first move into YYYYMM00, then be processed there.
           printf 'ROOT-ORIGINAL' > "$test_root/IMG_3333.HEIC"
@@ -65,14 +70,31 @@ jobs:
           test "$(cat "$test_root/20260910 QWER/Originals/AAE/IMG_1234.AAE")" = "AAE-DATA"
           test "$(cat "$test_root/20260910 QWER/IMG_5678.HEIC")" = "UNCHANGED"
 
+          topic_odd=("$test_root/20260910 QWER"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_topic\ odd.jpg(N))
+          test "${#topic_odd[@]}" -eq 1
+          test "$(cat "$topic_odd[1]")" = "TOPIC-ODD"
+
           test "$(cat "$test_root/20260910 QWER/IMG_2222.HEIC")" = "EDITED-SAME-EXT"
           test "$(cat "$test_root/20260910 QWER/Originals/IMG_2222.HEIC")" = "ORIGINAL-SAME-EXT"
 
-          test "$(cat "$test_root/$month_dir/IMG_9999.HEIC")" = "DAILY"
+          daily_img=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_9999.HEIC(N))
+          test "${#daily_img[@]}" -eq 1
+          test "$(cat "$daily_img[1]")" = "DAILY"
+          test ! -e "$test_root/$month_dir/IMG_9999.HEIC"
 
-          test "$(cat "$test_root/$month_dir/IMG_3333.JPG")" = "ROOT-EDITED"
+          daily_edit=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_3333.JPG(N))
+          test "${#daily_edit[@]}" -eq 1
+          test "$(cat "$daily_edit[1]")" = "ROOT-EDITED"
           test "$(cat "$test_root/$month_dir/Originals/IMG_3333.HEIC")" = "ROOT-ORIGINAL"
           test "$(cat "$test_root/$month_dir/Originals/AAE/IMG_3333.AAE")" = "ROOT-AAE"
+
+          live_heic=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_8888.HEIC(N))
+          live_mov=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_8888.MOV(N))
+          test "${#live_heic[@]}" -eq 1
+          test "${#live_mov[@]}" -eq 1
+          test "${live_heic[1]%_IMG_8888.HEIC}" = "${live_mov[1]%_IMG_8888.MOV}"
+          test "$(cat "$live_heic[1]")" = "LIVE-HEIC"
+          test "$(cat "$live_mov[1]")" = "LIVE-MOV"
 
           renamed=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_odd\ name.jpg(N))
           test "${#renamed[@]}" -eq 1
