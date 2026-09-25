@@ -16,7 +16,7 @@ photo-organize.command
 4. iPhone 編輯過的照片以 **編輯後版本當主檔**。
 5. 原始檔不刪除，而是收進 `Originals/`。
 6. 日常照片用 metadata 日期重新命名，方便長期依檔名排序與歸檔。
-7. 主題照片已有日期與主題資料夾，因此標準 `IMG_####` 不做不必要的重新命名。
+7. 主題照片已有日期與主題資料夾，因此一般媒體檔名全部保留；只有 `IMG_E#### → IMG_####` 的編輯版升級會改名。
 
 ---
 
@@ -42,7 +42,7 @@ Photo Archive/
 │   ├── IMG_5321.JPG
 │   ├── IMG_5322.HEIC
 │   ├── IMG_5322.MOV
-│   ├── 20260910-193401_A8F21D3C-AAAA-BBBB.JPG
+│   ├── A8F21D3C-AAAA-BBBB.JPG
 │   └── Originals/
 │       └── ...
 │
@@ -285,25 +285,30 @@ IMG_5322.MOV
 20260910-193422_IMG_5321.JPG
 ```
 
-### 主題中的非標準檔名仍會整理
+### 主題中的非標準 / 亂碼檔名也保持原名
 
 例如：
 
 ```text
 A8F21D3C-91AE-4F44.JPG
 odd name.jpg
+60581595025__E39E8118.HEIC
 ```
 
-仍會依 metadata 改成：
+都會保持原名。
+
+主題資料夾的原則是：
+
+> **一般媒體完全不做 metadata 重新命名。**
+
+唯一例外是 Apple 編輯照片的整理：
 
 ```text
-20260910-193401_A8F21D3C-91AE-4F44.JPG
-20260910-194502_odd name.jpg
+IMG_E1234.JPG
+→ IMG_1234.JPG
 ```
 
-所以主題的原則是：
-
-> 標準 `IMG_####` 保留；非標準名稱才加拍攝時間。
+這不是 metadata 命名，而是把編輯後版本升成主檔；對應原始檔仍會進 `Originals/`。
 
 ---
 
@@ -499,7 +504,9 @@ A8F21D3C-91AE-4F44.JPG
 odd name.jpg
 ```
 
-工具會保留完整原始 basename，在前面加拍攝時間：
+## 在日常 `YYYYMM00`
+
+仍會保留完整原始 basename，只在前面加拍攝時間：
 
 ```text
 YYYYMMDD-HHMMSS_原始檔名.ext
@@ -508,16 +515,24 @@ YYYYMMDD-HHMMSS_原始檔名.ext
 例如：
 
 ```text
-20260921-184501_A8F21D3C-91AE-4F44.JPG
+A8F21D3C-91AE-4F44.JPG
+→ 20260921-184501_A8F21D3C-91AE-4F44.JPG
 ```
 
-不會改成 literal 的：
+## 在主題 `YYYYMMDD 主題`
+
+完全保持原名：
 
 ```text
-YYYYMMDD-HHMMSS_original_filename.JPG
+A8F21D3C-91AE-4F44.JPG
+odd name.jpg
 ```
 
-「原始檔名」指的是真正原本的檔名。
+不會加日期，也不會清理或標準化檔名。
+
+因此現在的命名界線非常明確：
+
+> **日常靠檔名承載時間；主題靠資料夾承載日期與語意。**
 
 ---
 
@@ -547,7 +562,6 @@ YYYYMMDD-HHMMSS_...
 
 - 判斷根目錄散圖該進哪個 `YYYYMM00`
 - 替日常照片重新命名
-- 替主題中的非標準檔名重新命名
 
 依序嘗試：
 
@@ -730,15 +744,26 @@ IMG_####
 YYYYMMDD 主題/
 ```
 
-只有非標準檔名會加日期。
+Stage 3 **完全不做一般重新命名**。
 
-標準：
+以下都保持原名：
 
 ```text
-IMG_####
+IMG_1234.HEIC
+IMG_1234.MOV
+A8F21D3C-91AE-4F44.JPG
+odd name.jpg
 ```
 
-保持不變。
+但 Stage 2 的編輯照片邏輯仍照常執行：
+
+```text
+IMG_E1234.JPG
+→ IMG_1234.JPG
+
+IMG_1234.HEIC
+→ Originals/IMG_1234.HEIC
+```
 
 ---
 
@@ -914,7 +939,7 @@ YYYYMMDD 任意文字
 
 它只負責：
 
-> **安全地重新分類、升級編輯版、保存原始檔，以及依規則重新命名。**
+> **安全地重新分類、升級編輯版、保存原始檔，以及只在日常資料夾依規則重新命名。**
 
 ---
 
@@ -991,14 +1016,15 @@ zsh -n photo-organize.command
 - 根目錄散圖進入當月 `YYYYMM00`
 - 日常 `IMG_####` 會加 metadata 時間
 - 主題 `IMG_####` 維持原名
-- 主題非標準檔名會加 metadata 時間
+- 主題中的標準與非標準一般媒體都保持原名
 - `IMG_E####` 編輯版成為主檔
 - 原始 `IMG_####` 進入 `Originals/`
 - AAE 進入 `Originals/AAE/`
 - 原檔與編輯版副檔名相同時不互相覆寫
 - 日常編輯版完成後再進行 metadata 命名
 - 日常 Live Photo HEIC + MOV 使用相同時間前綴
-- 含空格的非標準檔名可正常處理
+- 日常中含空格的非標準檔名可正常處理
+- 主題中含空格 / UUID / 亂碼檔名不會被重新命名
 
 ---
 
@@ -1024,8 +1050,9 @@ YYYYMM00
 
 ```text
 YYYYMMDD 主題
-→ IMG_#### 保留
-→ 非標準名稱才用 metadata 命名
+→ 一般媒體全部保留原檔名
+→ IMG_E#### 仍會升成 IMG_####
+→ 對應原始檔仍進 Originals
 ```
 
 ### 編輯照片

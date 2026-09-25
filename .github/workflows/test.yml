@@ -35,6 +35,7 @@ jobs:
           printf 'AAE-DATA'     > "$test_root/20260910 QWER/IMG_1234.AAE"
           printf 'UNCHANGED'    > "$test_root/20260910 QWER/IMG_5678.HEIC"
           printf 'TOPIC-ODD'     > "$test_root/20260910 QWER/topic odd.jpg"
+          printf 'TOPIC-UUID'    > "$test_root/20260910 QWER/A8F21D3C-91AE-4F44.JPG"
 
           # Same-extension case: this verifies the original is archived before
           # the edited file claims the original IMG_#### name.
@@ -70,9 +71,10 @@ jobs:
           test "$(cat "$test_root/20260910 QWER/Originals/AAE/IMG_1234.AAE")" = "AAE-DATA"
           test "$(cat "$test_root/20260910 QWER/IMG_5678.HEIC")" = "UNCHANGED"
 
-          topic_odd=("$test_root/20260910 QWER"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_topic\ odd.jpg(N))
-          test "${#topic_odd[@]}" -eq 1
-          test "$(cat "$topic_odd[1]")" = "TOPIC-ODD"
+          test "$(cat "$test_root/20260910 QWER/topic odd.jpg")" = "TOPIC-ODD"
+          test "$(cat "$test_root/20260910 QWER/A8F21D3C-91AE-4F44.JPG")" = "TOPIC-UUID"
+          renamed_topic_odd=("$test_root/20260910 QWER"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_topic\ odd.jpg(N))
+          test "${#renamed_topic_odd[@]}" -eq 0
 
           test "$(cat "$test_root/20260910 QWER/IMG_2222.HEIC")" = "EDITED-SAME-EXT"
           test "$(cat "$test_root/20260910 QWER/Originals/IMG_2222.HEIC")" = "ORIGINAL-SAME-EXT"
