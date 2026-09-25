@@ -71,6 +71,11 @@ is_aae() {
   [[ "$(lower_ext "$1")" == "aae" ]]
 }
 
+is_capture_stamp() {
+  local value="$1"
+  [[ "$value" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] ]]
+}
+
 capture_stamp() {
   local file="$1"
   local stamp=""
@@ -80,7 +85,7 @@ capture_stamp() {
   # 如果使用者有安裝 exiftool，優先使用真正的媒體拍攝時間。
   if [[ -n "$EXIFTOOL" ]]; then
     stamp="$("$EXIFTOOL" -s3 -d "%Y%m%d-%H%M%S"       -DateTimeOriginal -CreateDate -MediaCreateDate -TrackCreateDate       "$file" 2>/dev/null | /usr/bin/grep -E '^[0-9]{8}-[0-9]{6}$' | /usr/bin/head -n 1)"
-    if [[ "$stamp" =~ '^[0-9]{8}-[0-9]{6}$' ]]; then
+    if is_capture_stamp "$stamp"; then
       print -r -- "$stamp"
       return 0
     fi
@@ -90,7 +95,7 @@ capture_stamp() {
   raw="$(/usr/bin/mdls -raw -name kMDItemContentCreationDate "$file" 2>/dev/null)"
   if [[ -n "$raw" && "$raw" != "(null)" ]]; then
     stamp="$(/bin/date -j -f "%Y-%m-%d %H:%M:%S %z" "$raw" "+%Y%m%d-%H%M%S" 2>/dev/null)"
-    if [[ "$stamp" =~ '^[0-9]{8}-[0-9]{6}$' ]]; then
+    if is_capture_stamp "$stamp"; then
       print -r -- "$stamp"
       return 0
     fi
@@ -99,7 +104,7 @@ capture_stamp() {
   raw="$(/usr/bin/mdls -raw -name kMDItemFSCreationDate "$file" 2>/dev/null)"
   if [[ -n "$raw" && "$raw" != "(null)" ]]; then
     stamp="$(/bin/date -j -f "%Y-%m-%d %H:%M:%S %z" "$raw" "+%Y%m%d-%H%M%S" 2>/dev/null)"
-    if [[ "$stamp" =~ '^[0-9]{8}-[0-9]{6}$' ]]; then
+    if is_capture_stamp "$stamp"; then
       print -r -- "$stamp"
       return 0
     fi
@@ -112,7 +117,7 @@ capture_stamp() {
   fi
 
   stamp="$(/bin/date -r "$epoch" "+%Y%m%d-%H%M%S" 2>/dev/null)"
-  if [[ "$stamp" =~ '^[0-9]{8}-[0-9]{6}$' ]]; then
+  if is_capture_stamp "$stamp"; then
     print -r -- "$stamp"
     return 0
   fi
@@ -276,11 +281,11 @@ execute_grouped_plan() {
         break
       fi
 
-      if /bin/mv "$s" "$d"; then
+      if /bin/mv -n "$s" "$d" && [[ ! -e "$s" && -e "$d" ]]; then
         completed_src+=("$s")
         completed_dst+=("$d")
       else
-        print "[ERROR][$label] 無法移動：$(relative_path "$s")"
+        print "[ERROR][$label] 無法安全移動或目的檔突然出現：$(relative_path "$s")"
         group_failed=1
         break
       fi
@@ -292,7 +297,9 @@ execute_grouped_plan() {
         d="${completed_dst[$i]}"
         if [[ -e "$d" && ! -e "$s" ]]; then
           /bin/mkdir -p "${s:h}" 2>/dev/null
-          /bin/mv "$d" "$s" 2>/dev/null || print "[ROLLBACK ERROR] $(relative_path "$d")"
+          if ! /bin/mv -n "$d" "$s" 2>/dev/null || [[ -e "$d" || ! -e "$s" ]]; then
+            print "[ROLLBACK ERROR] $(relative_path "$d")"
+          fi
         fi
       done
       (( failed_groups++ ))
@@ -309,9 +316,14 @@ archive_dirs() {
   local dir name
   for dir in "$ROOT"/*(/N); do
     name="${dir:t}"
-    if [[ "$name" =~ '^[0-9]{8}($|[[:space:]])' ]]; then
-      print -r -- "$dir"
-    fi
+    case "$name" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+        print -r -- "$dir"
+        ;;
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]\ *)
+        print -r -- "$dir"
+        ;;
+    esac
   done
 }
 
@@ -331,11 +343,11 @@ build_root_plan() {
     stem="${name%.*}"
     family="$stem"
 
-    if [[ "$stem" =~ '^IMG_E([0-9]{4})$' ]]; then
-      num="${match[1]}"
+    if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+      num="${stem#IMG_E}"
       family="APPLE:$num"
-    elif [[ "$stem" =~ '^IMG_([0-9]{4})$' ]]; then
-      num="${match[1]}"
+    elif [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+      num="${stem#IMG_}"
       family="APPLE:$num"
     fi
 
@@ -402,8 +414,8 @@ build_edit_plan() {
 
       stem="${file:t}"
       stem="${stem%.*}"
-      if [[ "$stem" =~ '^IMG_E([0-9]{4})$' ]]; then
-        num="${match[1]}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
       else
         continue
       fi
@@ -457,9 +469,9 @@ build_rename_plan() {
       stem="${name%.*}"
 
       # 標準 iPhone 主檔不改名；若編輯群組因衝突未處理，IMG_E 也保留等待下次。
-      [[ "$stem" =~ '^IMG_[0-9]{4}$' ]] && continue
-      [[ "$stem" =~ '^IMG_E[0-9]{4}$' ]] && continue
-      [[ "$stem" =~ '^[0-9]{8}-[0-9]{6}_.+' ]] && continue
+      [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]] && continue
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
 
       key="$dir|$stem"
       [[ -n "${seen[$key]-}" ]] && continue
@@ -525,7 +537,7 @@ print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不�
 print "  3. 所有 YYYYMMDD... 資料夾都套用相同整理規則。"
 print "  4. 有 IMG_E#### 編輯版時：編輯版成為 IMG_#### 主檔；原始媒體進 Originals/。"
 print "  5. AAE 不刪除，放到 Originals/AAE/。"
-print "  6. 非標準檔名改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  6. 標準 IMG_#### 保留原名；只有非標準檔名才改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
 print "  7. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
 
 # 第一階段：根目錄散圖按月份進「日常」資料夾。

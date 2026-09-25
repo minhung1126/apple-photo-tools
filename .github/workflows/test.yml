@@ -1,0 +1,60 @@
+name: Test macOS photo organizer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Syntax and executable bit
+        shell: zsh {0}
+        run: |
+          zsh -n photo-organize.command
+          test -x photo-organize.command
+
+      - name: Behavioral test
+        shell: zsh {0}
+        run: |
+          set -eu
+          test_root="$(mktemp -d)"
+          trap 'rm -rf "$test_root"' EXIT
+
+          cp -p photo-organize.command "$test_root/photo-organize.command"
+
+          mkdir -p "$test_root/20260910 QWER"
+          printf 'ORIGINAL-HEIC' > "$test_root/20260910 QWER/IMG_1234.HEIC"
+          printf 'EDITED-JPG'   > "$test_root/20260910 QWER/IMG_E1234.JPG"
+          printf 'AAE-DATA'     > "$test_root/20260910 QWER/IMG_1234.AAE"
+          printf 'UNCHANGED'    > "$test_root/20260910 QWER/IMG_5678.HEIC"
+
+          # Same-extension case: this verifies the original is archived before
+          # the edited file claims the original IMG_#### name.
+          printf 'ORIGINAL-SAME-EXT' > "$test_root/20260910 QWER/IMG_2222.HEIC"
+          printf 'EDITED-SAME-EXT'   > "$test_root/20260910 QWER/IMG_E2222.HEIC"
+
+          # A loose standard IMG file must be moved into YYYYMM00 but not renamed.
+          printf 'DAILY' > "$test_root/IMG_9999.HEIC"
+          month_dir="$(date +%Y%m)00"
+
+          (
+            cd "$test_root"
+            # Stage 1 = YES, stage 2 = YES, final pause = blank line.
+            printf 'YES\nYES\n\n' | ./photo-organize.command
+          )
+
+          test -d "$test_root/20260910 QWER"
+          test "$(cat "$test_root/20260910 QWER/IMG_1234.JPG")" = "EDITED-JPG"
+          test "$(cat "$test_root/20260910 QWER/Originals/IMG_1234.HEIC")" = "ORIGINAL-HEIC"
+          test "$(cat "$test_root/20260910 QWER/Originals/AAE/IMG_1234.AAE")" = "AAE-DATA"
+          test "$(cat "$test_root/20260910 QWER/IMG_5678.HEIC")" = "UNCHANGED"
+
+          test "$(cat "$test_root/20260910 QWER/IMG_2222.HEIC")" = "EDITED-SAME-EXT"
+          test "$(cat "$test_root/20260910 QWER/Originals/IMG_2222.HEIC")" = "ORIGINAL-SAME-EXT"
+
+          test "$(cat "$test_root/$month_dir/IMG_9999.HEIC")" = "DAILY"
