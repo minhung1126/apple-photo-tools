@@ -80,7 +80,6 @@ capture_stamp() {
   local file="$1"
   local stamp=""
   local raw=""
-  local epoch=""
 
   # 如果使用者有安裝 exiftool，優先使用真正的媒體拍攝時間。
   if [[ -n "$EXIFTOOL" ]]; then
@@ -101,27 +100,21 @@ capture_stamp() {
     fi
   fi
 
-  raw="$(/usr/bin/mdls -raw -name kMDItemFSCreationDate "$file" 2>/dev/null)"
-  if [[ -n "$raw" && "$raw" != "(null)" ]]; then
-    stamp="$(/bin/date -j -f "%Y-%m-%d %H:%M:%S %z" "$raw" "+%Y%m%d-%H%M%S" 2>/dev/null)"
+  # 不使用 filesystem creation / birth / modification time 當作拍攝時間。
+  # 這些時間可能只是下載、複製或匯出的時間；沒有真正媒體時間就回報失敗。
+  return 1
+}
+
+capture_stamp_from_files() {
+  local file stamp
+  for file in "$@"; do
+    [[ -e "$file" ]] || continue
+    stamp="$(capture_stamp "$file")" || continue
     if is_capture_stamp "$stamp"; then
       print -r -- "$stamp"
       return 0
     fi
-  fi
-
-  # 最後才退回檔案 birth time / modification time。
-  epoch="$(/usr/bin/stat -f "%B" "$file" 2>/dev/null)"
-  if [[ -z "$epoch" || "$epoch" == "-1" ]]; then
-    epoch="$(/usr/bin/stat -f "%m" "$file" 2>/dev/null)"
-  fi
-
-  stamp="$(/bin/date -r "$epoch" "+%Y%m%d-%H%M%S" 2>/dev/null)"
-  if is_capture_stamp "$stamp"; then
-    print -r -- "$stamp"
-    return 0
-  fi
-
+  done
   return 1
 }
 
@@ -388,8 +381,8 @@ build_root_plan() {
     fi
     [[ -n "$primary" ]] || continue
 
-    stamp="$(capture_stamp "$primary")" || {
-      print "[WARN] 讀不到日期，留在根目錄：$(relative_path "$primary")"
+    stamp="$(capture_stamp_from_files "${candidates[@]}")" || {
+      print "[WARN] 找不到拍攝時間 metadata，保持原位、不分類也不重新命名：$(relative_path "$primary")"
       continue
     }
     month="${stamp[1,6]}"
@@ -503,50 +496,25 @@ build_rename_plan() {
       group="RENAME:$counter"
 
       candidates=("$dir"/"$stem".*(.N))
-      primary=""
+      primary="$file"
+      stamp=""
 
-      # 日常中若主檔是編輯後版本，優先用 Originals 裡同名原檔讀拍攝時間。
-      if (( daily == 1 )) && [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
         original_candidates=("$dir"/Originals/"$stem".*(.N))
-        for c in "${original_candidates[@]}"; do
-          if is_image "$c"; then
-            primary="$c"
-            break
-          fi
-        done
-        if [[ -z "$primary" ]]; then
-          for c in "${original_candidates[@]}"; do
-            if is_media "$c"; then
-              primary="$c"
-              break
-            fi
-          done
-        fi
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
       fi
 
-      # 沒有歸檔原檔時，從目前這組檔案讀 metadata。
-      if [[ -z "$primary" ]]; then
-        for c in "${candidates[@]}"; do
-          if is_image "$c"; then
-            primary="$c"
-            break
-          fi
-        done
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
       fi
-      if [[ -z "$primary" ]]; then
-        for c in "${candidates[@]}"; do
-          if is_media "$c"; then
-            primary="$c"
-            break
-          fi
-        done
-      fi
-      [[ -n "$primary" ]] || continue
 
-      stamp="$(capture_stamp "$primary")" || {
-        print "[WARN] 讀不到日期，不重新命名：$(relative_path "$file")"
+      if [[ -z "$stamp" ]]; then
+        print "[WARN] 找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
         continue
-      }
+      fi
 
       for c in "${candidates[@]}"; do
         is_media "$c" || continue
@@ -583,7 +551,8 @@ print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 meta
 print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
 print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
 print "  6. AAE 不刪除，放到 Originals/AAE/。"
-print "  7. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+print "  7. 找不到拍攝時間 metadata 時會警告並保持原位/原檔名，不用檔案建立或修改時間猜測。"
+print "  8. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
 
 # 第一階段：根目錄散圖按月份進「日常」資料夾。
 build_root_plan "$ROOT_PLAN"

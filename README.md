@@ -558,12 +558,10 @@ YYYYMMDD-HHMMSS_...
 
 # 拍攝日期 / metadata 的來源順序
 
-工具需要日期來：
+工具需要真正可用的媒體時間來：
 
 - 判斷根目錄散圖該進哪個 `YYYYMM00`
 - 替日常照片重新命名
-
-依序嘗試：
 
 ## 1. ExifTool
 
@@ -574,56 +572,56 @@ YYYYMMDD-HHMMSS_...
 - `MediaCreateDate`
 - `TrackCreateDate`
 
-並選第一個有效值。
+並使用第一個有效值。
 
-ExifTool **不是必要套件**，沒有安裝也可以使用工具。
-
-如果有 Homebrew，可選擇安裝：
+如果有 Homebrew，可安裝：
 
 ```bash
 brew install exiftool
 ```
 
-對長期歸檔來說，安裝 ExifTool 通常能讓照片 / 影片內部拍攝時間的讀取更完整。
+## 2. macOS Spotlight content metadata
 
-## 2. macOS Spotlight metadata
-
-沒有 ExifTool 或讀不到時，嘗試：
+如果 ExifTool 沒有可用時間，會嘗試：
 
 ```text
 kMDItemContentCreationDate
 ```
 
-## 3. macOS 檔案建立時間
+這仍屬於媒體內容層級的建立時間。
 
-再讀：
+## 不再使用的時間
+
+工具**不會**拿以下 filesystem 時間冒充拍攝時間：
+
+- `kMDItemFSCreationDate`
+- filesystem birth time
+- modification time
+
+因為這些值很可能只是：
+
+- 下載時間
+- 複製時間
+- 匯出時間
+- 雲端重新建立檔案的時間
+
+而不是真正拍攝時間。
+
+## 找不到拍攝時間時
+
+如果整組照片 / Live Photo / 影片都找不到可用拍攝 metadata：
 
 ```text
-kMDItemFSCreationDate
+[WARN] 找不到拍攝時間 metadata ...
 ```
 
-以及檔案 birth time。
+然後：
 
-## 4. 檔案修改時間
+- 根目錄散圖：**留在根目錄，不建立猜測月份**
+- 已在 `YYYYMM00` 的日常檔案：**保持原檔名，不重新命名**
+- 不會使用檔案建立時間或修改時間硬猜日期
 
-前面都失敗時，最後才使用 modification time。
-
-### 重要
-
-越後面的 fallback 越不一定代表真正「按下快門」的時間。
-
-如果照片曾經：
-
-- 被重新下載
-- 經第三方 App 匯出
-- 經過雲端搬移
-- 被其他軟體重建檔案
-
-檔案建立時間可能已經改變。
-
-因此：
-
-> 有可用 EXIF / media metadata 時，永遠優先使用媒體內部時間。
+如果同一組 Live Photo 或相關媒體中只有部分檔案有拍攝時間，會使用同組第一個可用的拍攝 metadata，讓整組維持一致時間前綴。
 
 ---
 
@@ -857,7 +855,16 @@ Originals/AAE/
 
 ---
 
-## 7. Originals 不會再次自動整理
+## 7. 沒有拍攝時間就不猜
+
+如果找不到真正的拍攝 / 媒體建立 metadata：
+
+- 顯示 `[WARN]`
+- 不使用 filesystem 建立 / 修改時間代替
+- 根目錄檔案保持原位
+- 日常資料夾內檔案保持原檔名
+
+## 8. Originals 不會再次自動整理
 
 程式只掃描：
 

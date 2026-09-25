@@ -20,6 +20,9 @@ jobs:
           zsh -n photo-organize.command
           test -x photo-organize.command
 
+      - name: Install ExifTool
+        run: brew install exiftool
+
       - name: Behavioral test
         shell: zsh {0}
         run: |
@@ -28,6 +31,13 @@ jobs:
           trap 'rm -rf "$test_root"' EXIT
 
           cp -p photo-organize.command "$test_root/photo-organize.command"
+
+          # Tiny valid JPEG used for metadata-sensitive tests.
+          jpeg_b64='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAEf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q=='
+          make_jpeg() {
+            print -r -- "$jpeg_b64" | base64 --decode > "$1"
+            exiftool -overwrite_original -DateTimeOriginal='2026:09:25 14:25:30' -CreateDate='2026:09:25 14:25:30' "$1" >/dev/null
+          }
 
           mkdir -p "$test_root/20260910 QWER"
           printf 'ORIGINAL-HEIC' > "$test_root/20260910 QWER/IMG_1234.HEIC"
@@ -43,19 +53,22 @@ jobs:
           printf 'EDITED-SAME-EXT'   > "$test_root/20260910 QWER/IMG_E2222.HEIC"
 
           # Loose files in root: daily media must be renamed after monthly filing.
-          printf 'DAILY' > "$test_root/IMG_9999.HEIC"
+          make_jpeg "$test_root/IMG_9999.JPG"
 
           # Daily Live Photo pair must keep a shared timestamp prefix.
-          printf 'LIVE-HEIC' > "$test_root/IMG_8888.HEIC"
-          printf 'LIVE-MOV'  > "$test_root/IMG_8888.MOV"
+          make_jpeg "$test_root/IMG_8888.JPG"
+          printf 'LIVE-MOV' > "$test_root/IMG_8888.MOV"
 
           # Edited pair in root must first move into YYYYMM00, then be processed there.
-          printf 'ROOT-ORIGINAL' > "$test_root/IMG_3333.HEIC"
-          printf 'ROOT-EDITED'   > "$test_root/IMG_E3333.JPG"
-          printf 'ROOT-AAE'      > "$test_root/IMG_3333.AAE"
+          make_jpeg "$test_root/IMG_3333.JPG"
+          cp "$test_root/IMG_3333.JPG" "$test_root/IMG_E3333.JPG"
+          printf 'ROOT-AAE' > "$test_root/IMG_3333.AAE"
 
           # Non-standard name (including a space) must receive a capture-time prefix.
-          printf 'ODD-NAME' > "$test_root/odd name.jpg"
+          make_jpeg "$test_root/odd name.jpg"
+
+          # No capture metadata: must warn and remain untouched in root.
+          printf 'NO-METADATA' > "$test_root/no metadata.jpg"
 
           month_dir="$(date +%Y%m)00"
 
@@ -79,25 +92,29 @@ jobs:
           test "$(cat "$test_root/20260910 QWER/IMG_2222.HEIC")" = "EDITED-SAME-EXT"
           test "$(cat "$test_root/20260910 QWER/Originals/IMG_2222.HEIC")" = "ORIGINAL-SAME-EXT"
 
-          daily_img=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_9999.HEIC(N))
+          daily_img=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_9999.JPG(N))
           test "${#daily_img[@]}" -eq 1
-          test "$(cat "$daily_img[1]")" = "DAILY"
-          test ! -e "$test_root/$month_dir/IMG_9999.HEIC"
+          test -s "$daily_img[1]"
+          test ! -e "$test_root/$month_dir/IMG_9999.JPG"
 
           daily_edit=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_3333.JPG(N))
           test "${#daily_edit[@]}" -eq 1
-          test "$(cat "$daily_edit[1]")" = "ROOT-EDITED"
-          test "$(cat "$test_root/$month_dir/Originals/IMG_3333.HEIC")" = "ROOT-ORIGINAL"
+          test -s "$daily_edit[1]"
+          test -s "$test_root/$month_dir/Originals/IMG_3333.JPG"
           test "$(cat "$test_root/$month_dir/Originals/AAE/IMG_3333.AAE")" = "ROOT-AAE"
 
-          live_heic=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_8888.HEIC(N))
+          live_image=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_8888.JPG(N))
           live_mov=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_8888.MOV(N))
-          test "${#live_heic[@]}" -eq 1
+          test "${#live_image[@]}" -eq 1
           test "${#live_mov[@]}" -eq 1
-          test "${live_heic[1]%_IMG_8888.HEIC}" = "${live_mov[1]%_IMG_8888.MOV}"
-          test "$(cat "$live_heic[1]")" = "LIVE-HEIC"
+          test "${live_image[1]%_IMG_8888.JPG}" = "${live_mov[1]%_IMG_8888.MOV}"
+          test -s "$live_image[1]"
           test "$(cat "$live_mov[1]")" = "LIVE-MOV"
 
           renamed=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_odd\ name.jpg(N))
           test "${#renamed[@]}" -eq 1
-          test "$(cat "$renamed[1]")" = "ODD-NAME"
+          test -s "$renamed[1]"
+
+          test -e "$test_root/no metadata.jpg"
+          no_metadata_moved=("$test_root"/[0-9][0-9][0-9][0-9][0-9][0-9]00/no\ metadata.jpg(N))
+          test "${#no_metadata_moved[@]}" -eq 0
