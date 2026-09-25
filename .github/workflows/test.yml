@@ -40,14 +40,23 @@ jobs:
           printf 'ORIGINAL-SAME-EXT' > "$test_root/20260910 QWER/IMG_2222.HEIC"
           printf 'EDITED-SAME-EXT'   > "$test_root/20260910 QWER/IMG_E2222.HEIC"
 
-          # A loose standard IMG file must be moved into YYYYMM00 but not renamed.
+          # Loose files in root: standard names keep their names after monthly filing.
           printf 'DAILY' > "$test_root/IMG_9999.HEIC"
+
+          # Edited pair in root must first move into YYYYMM00, then be processed there.
+          printf 'ROOT-ORIGINAL' > "$test_root/IMG_3333.HEIC"
+          printf 'ROOT-EDITED'   > "$test_root/IMG_E3333.JPG"
+          printf 'ROOT-AAE'      > "$test_root/IMG_3333.AAE"
+
+          # Non-standard name (including a space) must receive a capture-time prefix.
+          printf 'ODD-NAME' > "$test_root/odd name.jpg"
+
           month_dir="$(date +%Y%m)00"
 
           (
             cd "$test_root"
-            # Stage 1 = YES, stage 2 = YES, final pause = blank line.
-            printf 'YES\nYES\n\n' | ./photo-organize.command
+            # Stage 1 = YES, stage 2 = YES, stage 3 = YES, final pause = blank line.
+            printf 'YES\nYES\nYES\n\n' | ./photo-organize.command
           )
 
           test -d "$test_root/20260910 QWER"
@@ -60,3 +69,11 @@ jobs:
           test "$(cat "$test_root/20260910 QWER/Originals/IMG_2222.HEIC")" = "ORIGINAL-SAME-EXT"
 
           test "$(cat "$test_root/$month_dir/IMG_9999.HEIC")" = "DAILY"
+
+          test "$(cat "$test_root/$month_dir/IMG_3333.JPG")" = "ROOT-EDITED"
+          test "$(cat "$test_root/$month_dir/Originals/IMG_3333.HEIC")" = "ROOT-ORIGINAL"
+          test "$(cat "$test_root/$month_dir/Originals/AAE/IMG_3333.AAE")" = "ROOT-AAE"
+
+          renamed=("$test_root/$month_dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_odd\ name.jpg(N))
+          test "${#renamed[@]}" -eq 1
+          test "$(cat "$renamed[1]")" = "ODD-NAME"
