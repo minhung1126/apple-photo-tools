@@ -17,6 +17,7 @@ jobs:
       - name: Syntax and executable bit
         shell: zsh {0}
         run: |
+          set -e
           zsh -n photo-organize.command
           test -x photo-organize.command
 
