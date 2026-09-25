@@ -1,0 +1,1 @@
+Temporary validation trigger for strict embedded metadata handling.
