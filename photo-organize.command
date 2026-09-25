@@ -79,7 +79,6 @@ is_capture_stamp() {
 capture_stamp() {
   local file="$1"
   local stamp=""
-  local raw=""
 
   # 如果使用者有安裝 exiftool，優先使用真正的媒體拍攝時間。
   if [[ -n "$EXIFTOOL" ]]; then
@@ -90,18 +89,9 @@ capture_stamp() {
     fi
   fi
 
-  # macOS 內建 Spotlight metadata。
-  raw="$(/usr/bin/mdls -raw -name kMDItemContentCreationDate "$file" 2>/dev/null)"
-  if [[ -n "$raw" && "$raw" != "(null)" ]]; then
-    stamp="$(/bin/date -j -f "%Y-%m-%d %H:%M:%S %z" "$raw" "+%Y%m%d-%H%M%S" 2>/dev/null)"
-    if is_capture_stamp "$stamp"; then
-      print -r -- "$stamp"
-      return 0
-    fi
-  fi
-
-  # 不使用 filesystem creation / birth / modification time 當作拍攝時間。
-  # 這些時間可能只是下載、複製或匯出的時間；沒有真正媒體時間就回報失敗。
+  # 不使用 Spotlight / filesystem creation / birth / modification time 當作拍攝時間。
+  # kMDItemContentCreationDate 對沒有內嵌拍攝資訊的檔案也可能退回檔案時間，
+  # 因此只有 ExifTool 直接讀到媒體內部時間才視為可靠。
   return 1
 }
 
@@ -544,6 +534,12 @@ run_stage() {
 title "Apple Photo Tools — macOS 歸檔"
 print "工作資料夾：$ROOT"
 print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：無法可靠讀取拍攝時間。"
+  print "       日常月份分類與 metadata 重新命名會跳過；主題編輯照片整理仍可執行。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
 print "規則："
 print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
 print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"

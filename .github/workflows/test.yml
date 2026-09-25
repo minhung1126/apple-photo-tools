@@ -67,16 +67,19 @@ jobs:
           # Non-standard name (including a space) must receive a capture-time prefix.
           make_jpeg "$test_root/odd name.jpg"
 
-          # No capture metadata: must warn and remain untouched in root.
+          # No capture metadata: must warn and remain untouched.
           printf 'NO-METADATA' > "$test_root/no metadata.jpg"
+          mkdir -p "$test_root/20260900"
+          printf 'NO-METADATA-DAILY' > "$test_root/20260900/no metadata daily.jpg"
 
-          month_dir="$(date +%Y%m)00"
+          month_dir="20260900"
 
           (
             cd "$test_root"
             # Stage 1 = YES, stage 2 = YES, stage 3 = YES, final pause = blank line.
-            printf 'YES\nYES\nYES\n\n' | ./photo-organize.command
+            printf 'YES\nYES\nYES\n\n' | ./photo-organize.command | tee "$test_root/run.log"
           )
+          grep -F "[WARN] 找不到拍攝時間 metadata" "$test_root/run.log" >/dev/null
 
           test -d "$test_root/20260910 QWER"
           test "$(cat "$test_root/20260910 QWER/IMG_1234.JPG")" = "EDITED-JPG"
@@ -118,3 +121,6 @@ jobs:
           test -e "$test_root/no metadata.jpg"
           no_metadata_moved=("$test_root"/[0-9][0-9][0-9][0-9][0-9][0-9]00/no\ metadata.jpg(N))
           test "${#no_metadata_moved[@]}" -eq 0
+          test "$(cat "$test_root/20260900/no metadata daily.jpg")" = "NO-METADATA-DAILY"
+          renamed_no_metadata_daily=("$test_root/20260900"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_no\ metadata\ daily.jpg(N))
+          test "${#renamed_no_metadata_daily[@]}" -eq 0

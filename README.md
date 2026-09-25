@@ -63,6 +63,16 @@ Photo Archive/
 
 # 使用方式
 
+## 0. 建議先安裝 ExifTool
+
+日常分類與重新命名需要可靠的媒體拍攝時間：
+
+```bash
+brew install exiftool
+```
+
+沒有 ExifTool 時，工具不會用 filesystem 時間猜日期；相關檔案會警告並保持不動。
+
 ## 1. 準備照片根目錄
 
 把 `photo-organize.command` **複製到這次要整理的照片所在根目錄**。
@@ -556,16 +566,16 @@ YYYYMMDD-HHMMSS_...
 
 ---
 
-# 拍攝日期 / metadata 的來源順序
+# 拍攝日期 / metadata 規則
 
-工具需要真正可用的媒體時間來：
+工具只有在能讀到**媒體檔案內部的拍攝 / 建立 metadata** 時，才會：
 
 - 判斷根目錄散圖該進哪個 `YYYYMM00`
 - 替日常照片重新命名
 
-## 1. ExifTool
+## 使用 ExifTool
 
-如果系統有安裝 ExifTool，優先讀：
+目前唯一視為可靠來源的是 ExifTool 直接讀到的媒體 metadata：
 
 - `DateTimeOriginal`
 - `CreateDate`
@@ -574,42 +584,35 @@ YYYYMMDD-HHMMSS_...
 
 並使用第一個有效值。
 
-如果有 Homebrew，可安裝：
+建議先安裝：
 
 ```bash
 brew install exiftool
 ```
 
-## 2. macOS Spotlight content metadata
+如果沒有安裝 ExifTool，工具仍可執行主題資料夾中的編輯照片整理，但**不會猜測日常照片的拍攝時間**。
 
-如果 ExifTool 沒有可用時間，會嘗試：
+## 不使用的時間
 
-```text
-kMDItemContentCreationDate
-```
+工具不會拿以下值冒充拍攝時間：
 
-這仍屬於媒體內容層級的建立時間。
-
-## 不再使用的時間
-
-工具**不會**拿以下 filesystem 時間冒充拍攝時間：
-
+- `kMDItemContentCreationDate`
 - `kMDItemFSCreationDate`
-- filesystem birth time
+- filesystem creation / birth time
 - modification time
 
-因為這些值很可能只是：
+原因是這些值可能只是：
 
 - 下載時間
 - 複製時間
 - 匯出時間
 - 雲端重新建立檔案的時間
 
-而不是真正拍攝時間。
+甚至 `kMDItemContentCreationDate` 在沒有真正內嵌照片 metadata 時，也可能呈現類似 filesystem 時間，因此不採用。
 
 ## 找不到拍攝時間時
 
-如果整組照片 / Live Photo / 影片都找不到可用拍攝 metadata：
+如果整組照片 / Live Photo / 影片都找不到可用的內部 metadata，會顯示：
 
 ```text
 [WARN] 找不到拍攝時間 metadata ...
@@ -621,7 +624,7 @@ kMDItemContentCreationDate
 - 已在 `YYYYMM00` 的日常檔案：**保持原檔名，不重新命名**
 - 不會使用檔案建立時間或修改時間硬猜日期
 
-如果同一組 Live Photo 或相關媒體中只有部分檔案有拍攝時間，會使用同組第一個可用的拍攝 metadata，讓整組維持一致時間前綴。
+如果同一組 Live Photo 或相關媒體中只有部分檔案有有效媒體時間，會使用同組第一個可用的 metadata，讓整組維持一致時間前綴。
 
 ---
 
