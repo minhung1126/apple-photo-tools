@@ -108,6 +108,49 @@ capture_stamp_from_files() {
   return 1
 }
 
+filesystem_creation_stamp() {
+  local file="$1"
+  local epoch stamp
+  epoch="$(/usr/bin/stat -f "%B" "$file" 2>/dev/null)" || return 1
+  [[ -n "$epoch" && "$epoch" != "-1" ]] || return 1
+  stamp="$(/bin/date -r "$epoch" "+%Y%m%d-%H%M%S" 2>/dev/null)" || return 1
+  is_capture_stamp "$stamp" || return 1
+  print -r -- "$stamp"
+}
+
+is_daily_fallback_asset() {
+  local file="$1"
+  local name="${file:t}"
+  local stem="${name%.*}"
+  local ext="$(lower_ext "$file")"
+
+  # iPhone 截圖通常是 IMG_####.PNG；PNG/GIF/WEBP 視為數位素材。
+  case "$ext" in
+    png|gif|webp) return 0 ;;
+  esac
+
+  # 非標準 basename 視為下載 / App 儲存 / 外部素材。
+  # 標準 Apple 相機型 IMG_#### / IMG_E#### 則必須有真正媒體 metadata。
+  if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] || "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+daily_fallback_stamp_from_files() {
+  local file stamp
+  for file in "$@"; do
+    [[ -e "$file" ]] || continue
+    is_media "$file" || continue
+    is_daily_fallback_asset "$file" || continue
+    stamp="$(filesystem_creation_stamp "$file")" || continue
+    print -r -- "$stamp"
+    return 0
+  done
+  return 1
+}
+
 append_plan() {
   local plan="$1"
   local group="$2"
@@ -371,10 +414,16 @@ build_root_plan() {
     fi
     [[ -n "$primary" ]] || continue
 
-    stamp="$(capture_stamp_from_files "${candidates[@]}")" || {
-      print "[WARN] 找不到拍攝時間 metadata，保持原位、不分類也不重新命名：$(relative_path "$primary")"
-      continue
-    }
+    stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+    if [[ -z "$stamp" ]]; then
+      stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+      if [[ -n "$stamp" ]]; then
+        print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間分類：$(relative_path "$primary")"
+      else
+        print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原位、不分類也不重新命名：$(relative_path "$primary")"
+        continue
+      fi
+    fi
     month="${stamp[1,6]}"
     dest_dir="$ROOT/${month}00"
 
@@ -502,8 +551,13 @@ build_rename_plan() {
       fi
 
       if [[ -z "$stamp" ]]; then
-        print "[WARN] 找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
-        continue
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
       fi
 
       for c in "${candidates[@]}"; do
@@ -535,8 +589,8 @@ title "Apple Photo Tools — macOS 歸檔"
 print "工作資料夾：$ROOT"
 print ""
 if [[ -z "$EXIFTOOL" ]]; then
-  print "[WARN] 未安裝 ExifTool：無法可靠讀取拍攝時間。"
-  print "       日常月份分類與 metadata 重新命名會跳過；主題編輯照片整理仍可執行。"
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
   print "       建議安裝：brew install exiftool"
   print ""
 fi
@@ -547,8 +601,9 @@ print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 meta
 print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
 print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
 print "  6. AAE 不刪除，放到 Originals/AAE/。"
-print "  7. 找不到拍攝時間 metadata 時會警告並保持原位/原檔名，不用檔案建立或修改時間猜測。"
-print "  8. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
 
 # 第一階段：根目錄散圖按月份進「日常」資料夾。
 build_root_plan "$ROOT_PLAN"

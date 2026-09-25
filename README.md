@@ -65,13 +65,13 @@ Photo Archive/
 
 ## 0. 建議先安裝 ExifTool
 
-日常分類與重新命名需要可靠的媒體拍攝時間：
+相機照片 / 影片需要可靠的媒體拍攝時間：
 
 ```bash
 brew install exiftool
 ```
 
-沒有 ExifTool 時，工具不會用 filesystem 時間猜日期；相關檔案會警告並保持不動。
+沒有 ExifTool 時，標準相機型 `IMG_####.HEIC/JPG/MOV/DNG` 會警告並保持不動；截圖、下載與 App 儲存等日常數位素材仍可使用檔案建立時間整理。
 
 ## 1. 準備照片根目錄
 
@@ -566,65 +566,128 @@ YYYYMMDD-HHMMSS_...
 
 ---
 
-# 拍攝日期 / metadata 規則
+# 日期來源與 fallback 規則
 
-工具只有在能讀到**媒體檔案內部的拍攝 / 建立 metadata** 時，才會：
+「日常」與「主題」是資料夾分類概念，**不是檔案來源類型**。
 
-- 判斷根目錄散圖該進哪個 `YYYYMM00`
-- 替日常照片重新命名
+只要檔案留在根目錄，就視為日常候選；主題則是你事先手動放進 `YYYYMMDD 主題` 的檔案。
 
-## 使用 ExifTool
+日常需要一個時間來：
 
-目前唯一視為可靠來源的是 ExifTool 直接讀到的媒體 metadata：
+- 決定要進哪個 `YYYYMM00`
+- 產生 `YYYYMMDD-HHMMSS_原始檔名.ext`
+
+因此時間來源分兩種。
+
+## A. 相機型照片 / 影片
+
+例如：
+
+```text
+IMG_1234.HEIC
+IMG_1234.JPG
+IMG_1234.MOV
+IMG_1234.DNG
+```
+
+這類檔案應該有真正的媒體拍攝時間。
+
+工具透過 ExifTool 依序讀：
 
 - `DateTimeOriginal`
 - `CreateDate`
 - `MediaCreateDate`
 - `TrackCreateDate`
 
-並使用第一個有效值。
-
-建議先安裝：
+建議安裝：
 
 ```bash
 brew install exiftool
 ```
 
-如果沒有安裝 ExifTool，工具仍可執行主題資料夾中的編輯照片整理，但**不會猜測日常照片的拍攝時間**。
-
-## 不使用的時間
-
-工具不會拿以下值冒充拍攝時間：
-
-- `kMDItemContentCreationDate`
-- `kMDItemFSCreationDate`
-- filesystem creation / birth time
-- modification time
-
-原因是這些值可能只是：
-
-- 下載時間
-- 複製時間
-- 匯出時間
-- 雲端重新建立檔案的時間
-
-甚至 `kMDItemContentCreationDate` 在沒有真正內嵌照片 metadata 時，也可能呈現類似 filesystem 時間，因此不採用。
-
-## 找不到拍攝時間時
-
-如果整組照片 / Live Photo / 影片都找不到可用的內部 metadata，會顯示：
+如果這類「相機型媒體」完全找不到內嵌拍攝 metadata：
 
 ```text
-[WARN] 找不到拍攝時間 metadata ...
+[WARN] 相機型媒體找不到拍攝時間 metadata ...
 ```
 
 然後：
 
-- 根目錄散圖：**留在根目錄，不建立猜測月份**
-- 已在 `YYYYMM00` 的日常檔案：**保持原檔名，不重新命名**
-- 不會使用檔案建立時間或修改時間硬猜日期
+- 在根目錄：保持原位，不猜月份
+- 已在 `YYYYMM00`：保持原檔名，不重新命名
 
-如果同一組 Live Photo 或相關媒體中只有部分檔案有有效媒體時間，會使用同組第一個可用的 metadata，讓整組維持一致時間前綴。
+不會拿檔案建立時間冒充相機拍攝時間。
+
+## B. 截圖 / 下載 / App 儲存等日常數位素材
+
+這類檔案不一定有 `DateTimeOriginal`，但它們仍然是「日常」。
+
+例如 iPhone 截圖：
+
+```text
+IMG_5678.PNG
+```
+
+或下載 / App 儲存的：
+
+```text
+wallpaper.jpg
+A8F21D3C-91AE-4F44.JPG
+odd name.jpg
+```
+
+處理順序：
+
+1. 有內嵌媒體時間 → 優先使用
+2. 沒有內嵌媒體時間 → 顯示 `[WARN]`
+3. 改用 filesystem creation / birth time 作為「這個日常素材產生 / 收進檔案庫的時間」
+4. 照常分入 `YYYYMM00`
+5. 照常重新命名
+
+例如：
+
+```text
+IMG_5678.PNG
+→ 20260900/
+→ 20260925-143501_IMG_5678.PNG
+```
+
+### 如何判斷日常數位素材
+
+目前視為 fallback 日常素材的情況：
+
+- `.PNG`、`.GIF`、`.WEBP`
+- basename 不是標準 `IMG_####` / `IMG_E####` 的媒體
+
+因此標準 `IMG_####.HEIC/JPG/MOV/DNG` 仍被視為相機型媒體，不會因缺少 metadata 就偷偷用 filesystem 時間。
+
+## 同組媒體
+
+同一 basename 的 Live Photo / 相關媒體會先嘗試使用同組第一個可用的內嵌媒體時間。
+
+若整組屬於日常數位素材且都沒有內嵌時間，才會使用同組第一個可用的檔案建立時間，讓整組維持相同時間前綴。
+
+## 主題資料夾不受這套命名 fallback 影響
+
+`YYYYMMDD 主題` 裡的一般媒體本來就不做 metadata 重新命名。
+
+所以不論是：
+
+```text
+IMG_1234.HEIC
+IMG_5678.PNG
+download.jpg
+odd name.jpg
+```
+
+都保持原檔名。
+
+唯一仍會改名的是編輯版升級：
+
+```text
+IMG_E1234.JPG
+→ IMG_1234.JPG
+```
 
 ---
 
@@ -858,14 +921,11 @@ Originals/AAE/
 
 ---
 
-## 7. 沒有拍攝時間就不猜
+## 7. 沒有拍攝時間時依檔案類型處理
 
-如果找不到真正的拍攝 / 媒體建立 metadata：
-
-- 顯示 `[WARN]`
-- 不使用 filesystem 建立 / 修改時間代替
-- 根目錄檔案保持原位
-- 日常資料夾內檔案保持原檔名
+- 相機型媒體：警告並保持不動，不猜拍攝時間。
+- 截圖 / 下載 / App 儲存等日常數位素材：警告後使用檔案建立時間，仍會完成日常分類與命名。
+- 主題資料夾的一般媒體：本來就不重新命名。
 
 ## 8. Originals 不會再次自動整理
 
