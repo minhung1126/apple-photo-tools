@@ -1,0 +1,1 @@
+Temporary validation trigger for simplified daily/topic rules.
