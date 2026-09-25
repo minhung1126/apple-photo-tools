@@ -40,6 +40,8 @@ jobs:
           }
 
           mkdir -p "$test_root/20260910 QWER"
+          mkdir -p "$test_root/20260911"
+          printf 'BARE-TOPIC' > "$test_root/20260911/odd bare topic.jpg"
           printf 'ORIGINAL-HEIC' > "$test_root/20260910 QWER/IMG_1234.HEIC"
           printf 'EDITED-JPG'   > "$test_root/20260910 QWER/IMG_E1234.JPG"
           printf 'AAE-DATA'     > "$test_root/20260910 QWER/IMG_1234.AAE"
@@ -67,17 +69,20 @@ jobs:
           # Non-standard name (including a space) must receive a capture-time prefix.
           make_jpeg "$test_root/odd name.jpg"
 
-          # Screenshot without EXIF: daily fallback must use filesystem creation time.
+          # No EXIF: source type does not matter; all daily files must still be renamed.
           printf 'SCREENSHOT' > "$test_root/IMG_7777.PNG"
-
-          # Downloaded/non-standard image without EXIF: also daily fallback.
           printf 'DOWNLOAD' > "$test_root/downloaded image.jpg"
-
-          # Camera-like standard IMG without EXIF: must warn and remain untouched.
-          printf 'NO-CAPTURE-CAMERA' > "$test_root/IMG_6666.JPG"
+          printf 'NO-EXIF-STANDARD-IMG' > "$test_root/IMG_6666.JPG"
 
           mkdir -p "$test_root/20260900"
-          printf 'NO-CAPTURE-CAMERA-DAILY' > "$test_root/20260900/IMG_5555.JPG"
+          printf 'NO-EXIF-DAILY' > "$test_root/20260900/IMG_5555.JPG"
+
+          # Already-renamed root file: prefix must be authoritative for month routing
+          # and must not be added a second time.
+          printf 'ALREADY-NAMED' > "$test_root/20250102-030405_already.jpg"
+
+          # Already-renamed file inside daily folder stays unchanged.
+          printf 'ALREADY-DAILY' > "$test_root/20260900/20260920-101010_existing.jpg"
 
           month_dir="20260900"
 
@@ -86,8 +91,7 @@ jobs:
             # Stage 1 = YES, stage 2 = YES, stage 3 = YES, final pause = blank line.
             printf 'YES\nYES\nYES\n\n' | ./photo-organize.command | tee "$test_root/run.log"
           )
-          grep -F "[WARN] 日常數位素材沒有拍攝 metadata" "$test_root/run.log" >/dev/null
-          grep -F "[WARN] 相機型媒體找不到拍攝時間 metadata" "$test_root/run.log" >/dev/null
+          grep -F "[WARN] 找不到內嵌拍攝時間，使用檔案建立時間" "$test_root/run.log" >/dev/null
 
           test -d "$test_root/20260910 QWER"
           test "$(cat "$test_root/20260910 QWER/IMG_1234.JPG")" = "EDITED-JPG"
@@ -97,6 +101,7 @@ jobs:
 
           test "$(cat "$test_root/20260910 QWER/topic odd.jpg")" = "TOPIC-ODD"
           test "$(cat "$test_root/20260910 QWER/A8F21D3C-91AE-4F44.JPG")" = "TOPIC-UUID"
+          test "$(cat "$test_root/20260911/odd bare topic.jpg")" = "BARE-TOPIC"
           renamed_topic_odd=("$test_root/20260910 QWER"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_topic\ odd.jpg(N))
           test "${#renamed_topic_odd[@]}" -eq 0
 
@@ -134,10 +139,16 @@ jobs:
           test "${#downloaded[@]}" -eq 1
           test "$(cat "$downloaded[1]")" = "DOWNLOAD"
 
-          test "$(cat "$test_root/IMG_6666.JPG")" = "NO-CAPTURE-CAMERA"
-          camera_moved=("$test_root"/[0-9][0-9][0-9][0-9][0-9][0-9]00/IMG_6666.JPG(N))
-          test "${#camera_moved[@]}" -eq 0
+          standard_no_exif=("$test_root"/[0-9][0-9][0-9][0-9][0-9][0-9]00/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_6666.JPG(N))
+          test "${#standard_no_exif[@]}" -eq 1
+          test "$(cat "$standard_no_exif[1]")" = "NO-EXIF-STANDARD-IMG"
 
-          test "$(cat "$test_root/20260900/IMG_5555.JPG")" = "NO-CAPTURE-CAMERA-DAILY"
-          renamed_camera_daily=("$test_root/20260900"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_5555.JPG(N))
-          test "${#renamed_camera_daily[@]}" -eq 0
+          renamed_no_exif_daily=("$test_root/20260900"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_IMG_5555.JPG(N))
+          test "${#renamed_no_exif_daily[@]}" -eq 1
+          test "$(cat "$renamed_no_exif_daily[1]")" = "NO-EXIF-DAILY"
+
+          test "$(cat "$test_root/20250100/20250102-030405_already.jpg")" = "ALREADY-NAMED"
+          test ! -e "$test_root/20250100/20250102-030405_20250102-030405_already.jpg"
+
+          test "$(cat "$test_root/20260900/20260920-101010_existing.jpg")" = "ALREADY-DAILY"
+          test ! -e "$test_root/20260900/20260920-101010_20260920-101010_existing.jpg"

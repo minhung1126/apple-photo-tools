@@ -108,7 +108,26 @@ capture_stamp_from_files() {
   return 1
 }
 
-filesystem_creation_stamp() {
+filename_stamp() {
+  local file="$1"
+  local name="${file:t}"
+  local prefix="${name[1,15]}"
+  is_capture_stamp "$prefix" || return 1
+  print -r -- "$prefix"
+}
+
+filename_stamp_from_files() {
+  local file stamp
+  for file in "$@"; do
+    [[ -e "$file" ]] || continue
+    stamp="$(filename_stamp "$file")" || continue
+    print -r -- "$stamp"
+    return 0
+  done
+  return 1
+}
+
+filesystem_birth_stamp() {
   local file="$1"
   local epoch stamp
   epoch="$(/usr/bin/stat -f "%B" "$file" 2>/dev/null)" || return 1
@@ -118,37 +137,87 @@ filesystem_creation_stamp() {
   print -r -- "$stamp"
 }
 
-is_daily_fallback_asset() {
-  local file="$1"
-  local name="${file:t}"
-  local stem="${name%.*}"
-  local ext="$(lower_ext "$file")"
-
-  # iPhone 截圖通常是 IMG_####.PNG；PNG/GIF/WEBP 視為數位素材。
-  case "$ext" in
-    png|gif|webp) return 0 ;;
-  esac
-
-  # 非標準 basename 視為下載 / App 儲存 / 外部素材。
-  # 標準 Apple 相機型 IMG_#### / IMG_E#### 則必須有真正媒體 metadata。
-  if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] || "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
-    return 1
-  fi
-
-  return 0
-}
-
-daily_fallback_stamp_from_files() {
+filesystem_birth_stamp_from_files() {
   local file stamp
   for file in "$@"; do
     [[ -e "$file" ]] || continue
     is_media "$file" || continue
-    is_daily_fallback_asset "$file" || continue
-    stamp="$(filesystem_creation_stamp "$file")" || continue
+    stamp="$(filesystem_birth_stamp "$file")" || continue
     print -r -- "$stamp"
     return 0
   done
   return 1
+}
+
+filesystem_mtime_stamp() {
+  local file="$1"
+  local epoch stamp
+  epoch="$(/usr/bin/stat -f "%m" "$file" 2>/dev/null)" || return 1
+  [[ -n "$epoch" ]] || return 1
+  stamp="$(/bin/date -r "$epoch" "+%Y%m%d-%H%M%S" 2>/dev/null)" || return 1
+  is_capture_stamp "$stamp" || return 1
+  print -r -- "$stamp"
+}
+
+filesystem_mtime_stamp_from_files() {
+  local file stamp
+  for file in "$@"; do
+    [[ -e "$file" ]] || continue
+    is_media "$file" || continue
+    stamp="$(filesystem_mtime_stamp "$file")" || continue
+    print -r -- "$stamp"
+    return 0
+  done
+  return 1
+}
+
+# 日常一律需要時間。完全不判斷檔案來源，只按同一套優先序：
+# 1. 已有 YYYYMMDD-HHMMSS_ 前綴（確保重跑 / 搬回根目錄時冪等）
+# 2. 媒體內嵌時間
+# 3. filesystem birth / creation time
+# 4. filesystem modification time
+# 輸出格式：source<TAB>YYYYMMDD-HHMMSS
+daily_stamp_info_from_files() {
+  local stamp
+
+  stamp="$(filename_stamp_from_files "$@")" || stamp=""
+  if [[ -n "$stamp" ]]; then
+    print -r -- "filename"$'\t'"$stamp"
+    return 0
+  fi
+
+  stamp="$(capture_stamp_from_files "$@")" || stamp=""
+  if [[ -n "$stamp" ]]; then
+    print -r -- "metadata"$'\t'"$stamp"
+    return 0
+  fi
+
+  stamp="$(filesystem_birth_stamp_from_files "$@")" || stamp=""
+  if [[ -n "$stamp" ]]; then
+    print -r -- "birth"$'\t'"$stamp"
+    return 0
+  fi
+
+  stamp="$(filesystem_mtime_stamp_from_files "$@")" || stamp=""
+  if [[ -n "$stamp" ]]; then
+    print -r -- "mtime"$'\t'"$stamp"
+    return 0
+  fi
+
+  return 1
+}
+
+warn_timestamp_fallback() {
+  local source="$1"
+  local file="$2"
+  case "$source" in
+    birth)
+      print "[WARN] 找不到內嵌拍攝時間，使用檔案建立時間：$(relative_path "$file")"
+      ;;
+    mtime)
+      print "[WARN] 找不到內嵌拍攝時間與建立時間，最後使用檔案修改時間：$(relative_path "$file")"
+      ;;
+  esac
 }
 
 append_plan() {
@@ -244,7 +313,9 @@ execute_grouped_plan() {
     done < "$plan"
 
     local blocked=0
-    local i existing_is_source s d
+    local i existing_is_source s d dest_key
+    typeset -A planned_destinations
+    planned_destinations=()
 
     for (( i=1; i<=${#sources[@]}; i++ )); do
       s="${sources[$i]}"
@@ -255,6 +326,15 @@ execute_grouped_plan() {
         blocked=1
         break
       fi
+
+      # 即使在大小寫不敏感的 APFS 上，也先擋掉同組內重複目的檔。
+      dest_key="${d:l}"
+      if [[ -n "${planned_destinations[$dest_key]-}" ]]; then
+        print "[SKIP][$label] 同組內目的檔名碰撞：$(relative_path "$d")"
+        blocked=1
+        break
+      fi
+      planned_destinations[$dest_key]=1
 
       if ! same_device "$s" "$d"; then
         print "[SKIP][$label] 偵測到跨磁碟：$(relative_path "$s")"
@@ -414,16 +494,1416 @@ build_root_plan() {
     fi
     [[ -n "$primary" ]] || continue
 
-    stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
-    if [[ -z "$stamp" ]]; then
-      stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
-      if [[ -n "$stamp" ]]; then
-        print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間分類：$(relative_path "$primary")"
+    local stamp_info stamp_source
+    stamp_info="$(daily_stamp_info_from_files "${candidates[@]}")" || {
+      print "[WARN] 無法取得任何可用時間，保持原位：$(relative_path "$primary")"
+      continue
+    }
+    stamp_source="${stamp_info%%
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
       else
-        print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原位、不分類也不重新命名：$(relative_path "$primary")"
         continue
       fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      local stamp_info stamp_source
+      stamp_info=""
+
+      # 編輯後主檔仍優先沿用 Originals 同 basename 原始媒體的時間，
+      # 但時間來源本身不再區分相機 / 截圖 / 下載。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp_info="$(daily_stamp_info_from_files "${original_candidates[@]}")" || stamp_info=""
+      fi
+
+      if [[ -z "$stamp_info" ]]; then
+        stamp_info="$(daily_stamp_info_from_files "${candidates[@]}")" || stamp_info=""
+      fi
+
+      if [[ -z "$stamp_info" ]]; then
+        print "[WARN] 無法取得任何可用時間，無法重新命名：$(relative_path "$file")"
+        continue
+      fi
+
+      stamp_source="${stamp_info%%
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
     fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：日常仍會整理，但只能從檔案建立/修改時間取得日期。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體一律整理成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 日常時間來源統一：既有前綴 → 內嵌 metadata → 建立時間 → 修改時間。"
+print "  8. 不判斷相機/截圖/下載來源；日常一律套用同一套命名規則。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'*}"
+    stamp="${stamp_info#*
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
+      else
+        continue
+      fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
+      fi
+
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+      fi
+
+      if [[ -z "$stamp" ]]; then
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
+      fi
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'}"
+    warn_timestamp_fallback "$stamp_source" "$primary"
+    month="${stamp[1,6]}"
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
+      else
+        continue
+      fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
+      fi
+
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+      fi
+
+      if [[ -z "$stamp" ]]; then
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
+      fi
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'*}"
+      stamp="${stamp_info#*
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'*}"
+    stamp="${stamp_info#*
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
+      else
+        continue
+      fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
+      fi
+
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+      fi
+
+      if [[ -z "$stamp" ]]; then
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
+      fi
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'}"
+    warn_timestamp_fallback "$stamp_source" "$primary"
+    month="${stamp[1,6]}"
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
+      else
+        continue
+      fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
+      fi
+
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+      fi
+
+      if [[ -z "$stamp" ]]; then
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
+      fi
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'}"
+      warn_timestamp_fallback "$stamp_source" "$file"
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'*}"
+    stamp="${stamp_info#*
+    dest_dir="$ROOT/${month}00"
+
+    for c in "${candidates[@]}"; do
+      if is_media "$c" || is_aae "$c"; then
+        append_plan "$plan" "$group" "$c" "$dest_dir/${c:t}"
+      fi
+    done
+  done
+}
+
+build_edit_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local meta_counter=0
+  local dir file stem num key group c ext target
+
+  local -a dirs
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    for file in "$dir"/IMG_E[0-9][0-9][0-9][0-9].*(.N); do
+      is_media "$file" || continue
+
+      stem="${file:t}"
+      stem="${stem%.*}"
+      if [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_E}"
+      else
+        continue
+      fi
+
+      key="$dir|$num"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="EDIT:$counter"
+
+      # 先把同編號原始媒體全部歸檔。
+      for c in "$dir"/IMG_"$num".*(.N); do
+        is_media "$c" || continue
+        append_plan "$plan" "$group" "$c" "$dir/Originals/${c:t}"
+      done
+
+      # 再把 IMG_E#### 升成主檔 IMG_####，保留編輯版副檔名。
+      for c in "$dir"/IMG_E"$num".*(.N); do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        target="$dir/IMG_$num.$ext"
+        append_plan "$plan" "$group" "$c" "$target"
+      done
+    done
+
+    # AAE 一律歸檔，不刪除。
+    for file in "$dir"/*(.N); do
+      is_aae "$file" || continue
+      (( meta_counter++ ))
+      group="AAE:$meta_counter"
+      append_plan "$plan" "$group" "$file" "$dir/Originals/AAE/${file:t}"
+    done
+  done
+}
+
+build_rename_plan() {
+  local plan="$1"
+  typeset -A seen
+  local counter=0
+  local dir file name stem key group primary stamp c ext dest num
+  local -a dirs candidates original_candidates pending_edits
+
+  dirs=("${(@f)$(archive_dirs)}")
+
+  for dir in "${dirs[@]}"; do
+    local daily=0
+    is_daily_dir "$dir" && daily=1
+
+    # 主題資料夾完全不做一般檔名重新命名。
+    # 其中的 IMG_E#### -> IMG_#### 只由 Stage 2 的編輯照片整理負責。
+    (( daily == 1 )) || continue
+
+    for file in "$dir"/*(.N); do
+      is_media "$file" || continue
+
+      name="${file:t}"
+      stem="${name%.*}"
+
+      # 已經依 metadata 命名過的檔案永遠不重複處理。
+      [[ "$stem" == [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]_* ]] && continue
+
+      # 日常 YYYYMM00：所有主媒體都要加拍攝時間。
+      # 若 IMG_E#### 還存在，代表編輯版整理未執行/失敗，整組先不要改名，
+      # 避免把原檔與待處理編輯版拆散。
+      [[ "$stem" == IMG_E[0-9][0-9][0-9][0-9] ]] && continue
+
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        num="${stem#IMG_}"
+        pending_edits=("$dir"/IMG_E"$num".*(.N))
+        if (( ${#pending_edits[@]} > 0 )); then
+          continue
+        fi
+      fi
+
+      key="$dir|$stem"
+      [[ -n "${seen[$key]-}" ]] && continue
+      seen[$key]=1
+      (( counter++ ))
+      group="RENAME:$counter"
+
+      candidates=("$dir"/"$stem".*(.N))
+      primary="$file"
+      stamp=""
+
+      # 日常中若主檔是編輯後版本，優先從 Originals 裡同 basename 的原始媒體
+      # 尋找第一個真正可用的拍攝 metadata。
+      if [[ "$stem" == IMG_[0-9][0-9][0-9][0-9] ]]; then
+        original_candidates=("$dir"/Originals/"$stem".*(.N))
+        stamp="$(capture_stamp_from_files "${original_candidates[@]}")" || stamp=""
+      fi
+
+      # 原始媒體沒有可用拍攝時間時，再嘗試目前同 basename 的所有主媒體。
+      if [[ -z "$stamp" ]]; then
+        stamp="$(capture_stamp_from_files "${candidates[@]}")" || stamp=""
+      fi
+
+      if [[ -z "$stamp" ]]; then
+        stamp="$(daily_fallback_stamp_from_files "${candidates[@]}")" || stamp=""
+        if [[ -n "$stamp" ]]; then
+          print "[WARN] 日常數位素材沒有拍攝 metadata，使用檔案建立時間重新命名：$(relative_path "$file")"
+        else
+          print "[WARN] 相機型媒體找不到拍攝時間 metadata，保持原檔名、不重新命名：$(relative_path "$file")"
+          continue
+        fi
+      fi
+
+      for c in "${candidates[@]}"; do
+        is_media "$c" || continue
+        ext="${c:t}"
+        ext="${ext##*.}"
+        dest="$dir/${stamp}_${stem}.$ext"
+        append_plan "$plan" "$group" "$c" "$dest"
+      done
+    done
+  done
+}
+
+run_stage() {
+  local plan="$1"
+  local label="$2"
+  local question="$3"
+
+  if preview_plan "$plan" "$label"; then
+    if confirm_yes "$question"; then
+      execute_grouped_plan "$plan" "$label"
+    else
+      print "[$label] 已取消，沒有變更檔案。"
+    fi
+  fi
+}
+
+title "Apple Photo Tools — macOS 歸檔"
+print "工作資料夾：$ROOT"
+print ""
+if [[ -z "$EXIFTOOL" ]]; then
+  print "[WARN] 未安裝 ExifTool：相機照片/影片無法可靠讀取拍攝時間。"
+  print "       截圖/下載等日常數位素材仍可用檔案建立時間整理。"
+  print "       建議安裝：brew install exiftool"
+  print ""
+fi
+print "規則："
+print "  1. 根目錄散著的照片/影片依拍攝月份移到 YYYYMM00，例如 20260900。"
+print "  2. 你自己建立的主題資料夾，例如「20260910 QWER」，不會被改名或搬走。"
+print "  3. 日常 YYYYMM00：所有主媒體（包含 IMG_####）依拍攝 metadata 改成 YYYYMMDD-HHMMSS_原始檔名.ext。"
+print "  4. 主題 YYYYMMDD 主題：一般媒體全部保留原檔名，不做 metadata 重新命名。"
+print "  5. 有 IMG_E#### 編輯版時：編輯版成為主檔；原始媒體進 Originals/。"
+print "  6. AAE 不刪除，放到 Originals/AAE/。"
+print "  7. 截圖/下載等日常數位素材沒有拍攝 metadata 時，會警告並改用檔案建立時間。"
+print "  8. 相機型媒體沒有拍攝 metadata 時，會警告並保持原位/原檔名。"
+print "  9. 不覆寫既有檔案；同組遇到衝突會整組跳過；跨磁碟會跳過。"
+
+# 第一階段：根目錄散圖按月份進「日常」資料夾。
+build_root_plan "$ROOT_PLAN"
+run_stage "$ROOT_PLAN" "散圖按月份整理" "以上散圖將移到對應的 YYYYMM00。"
+
+# 第二階段：處理日常與主題資料夾內的 Apple 編輯版 / 原檔 / AAE。
+build_edit_plan "$EDIT_PLAN"
+run_stage "$EDIT_PLAN" "編輯版與原檔整理" "以上編輯版將留作主檔，原始檔與 AAE 將歸檔到 Originals。"
+
+# 第三階段：只有日常 YYYYMM00 做 metadata 命名；主題資料夾不做一般重新命名。
+build_rename_plan "$RENAME_PLAN"
+run_stage "$RENAME_PLAN" "日常 Metadata 檔名整理" "以上日常檔案將依拍攝時間重新命名；主題資料夾不會在此階段改名。"
+
+print ""
+print "最後的典型結構："
+print "  20260900/"
+print "    20260921-184501_IMG_1234.JPG"
+print "    20260921-190012_IMG_5678.HEIC"
+print "    20260921-190012_IMG_5678.MOV"
+print "    Originals/"
+print "      IMG_1234.HEIC"
+print "      AAE/"
+print "  20260910 QWER/"
+print "    IMG_5678.JPG"
+print "    IMG_5679.HEIC"
+print "    Originals/"
+
+pause_end
+\t'}"
+    warn_timestamp_fallback "$stamp_source" "$primary"
     month="${stamp[1,6]}"
     dest_dir="$ROOT/${month}00"
 
